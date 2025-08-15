@@ -86,6 +86,62 @@ function minePatterns(text){
 
 // ---- Guilds (APL → Tools MCP)
 const Guild = {
+
+  async Docs_changelog(proc, ctx, { version, items=[] }){
+    const res = await mcpCall(proc,'tools/call',{ name:'changelog_bump', arguments:{ version, items }}, id());
+    await journal({event:'changelog_bump', version});
+    return res;
+  },
+
+
+  async Security_secrets(proc, ctx, { dir='.' }){
+    const res = await mcpCall(proc,'tools/call',{ name:'git_secret_scan', arguments:{ dir }}, id());
+    await journal({event:'secret_scan', dir, out:(res.content?.[0]?.text||'').slice(0,400)});
+    return res;
+  },
+
+
+  async DevOps_ansibleCheck(proc, ctx, { playbook }){
+    const res = await mcpCall(proc,'tools/call',{ name:'ansible_syntax_check', arguments:{ playbook }}, id());
+    await journal({event:'ansible_syntax_check', playbook});
+    return res;
+  },
+
+
+  async DevOps_tfValidate(proc, ctx, { dir='.' }){
+    const res = await mcpCall(proc,'tools/call',{ name:'terraform_validate', arguments:{ dir }}, id());
+    await journal({event:'terraform_validate', dir});
+    return res;
+  },
+
+
+  async DevOps_helmTemplate(proc, ctx, { chart, values=[], out }){
+    const res = await mcpCall(proc,'tools/call',{ name:'helm_template', arguments:{ chart, values, out }}, id());
+    await journal({event:'helm_template', chart, out });
+    return res;
+  },
+
+
+  async DevOps_k8sApply(proc, ctx, { file }){
+    const res = await mcpCall(proc,'tools/call',{ name:'k8s_apply', arguments:{ file }}, id());
+    await journal({event:'k8s_apply', file});
+    return res;
+  },
+
+
+  async Security_semgrep(proc, ctx, { dir='.' }){
+    const res = await mcpCall(proc,'tools/call',{ name:'semgrep_scan', arguments:{ dir }}, id());
+    await journal({event:'semgrep_scan', out:(res.content?.[0]?.text||'').slice(0,400)});
+    return res;
+  },
+
+
+  async Security_trivy(proc, ctx, { target='.', format='table', severity }){
+    const res = await mcpCall(proc,'tools/call',{ name:'trivy_scan', arguments:{ target, format, severity }}, id());
+    await journal({event:'trivy_scan', target, out:(res.content?.[0]?.text||'').slice(0,400)});
+    return res;
+  },
+
   async Code_globalScan(proc, ctx, { root='.', exts=['.js','.ts','.py'] }){
     const hits = {};
     for (const ext of exts){
@@ -217,76 +273,96 @@ function id(){ return Math.random().toString(36).slice(2); }
 function dedupUrls(arr){ const seen=new Set(); const out=[]; for(const x of arr){ if(!seen.has(x.url)){ seen.add(x.url); out.push(x); } } return out; }
 
 // ---- Planner: APL dinamica ----
+
 async function deriveAPL(){
   const steps = [{ id:'scan', do:'code.global_scan', with:{ root:'.' } }];
 
-  const hasPkg = existsSync(path.join(ROOT, 'package.json'));
-  const hasPy  = existsSync(path.join(ROOT, 'pyproject.toml')) || existsSync(path.join(ROOT,'requirements.txt'));
+  const hasPkg   = existsSync(path.join(ROOT, 'package.json'));
+  const hasPy    = existsSync(path.join(ROOT, 'pyproject.toml')) || existsSync(path.join(ROOT,'requirements.txt'));
   if (hasPkg) steps.push({ id:'lint_node', do:'qa.lint', with:{ type:'node', path:'.' } });
   if (hasPy)  steps.push({ id:'lint_py',   do:'qa.lint', with:{ type:'python', path:'.' } });
   if (hasPkg) steps.push({ id:'test_node', do:'qa.test', with:{ type:'node', path:'.' } });
   if (hasPy)  steps.push({ id:'test_py',   do:'qa.test', with:{ type:'python', path:'.' } });
 
-  // Compose auto (solo scaffold in CI)
-  if (existsSync(path.join(ROOT, 'Dockerfile'))){
+  // Compose (scaffold+up se non in CI)
+  if (existsSync(path.join(ROOT, 'Dockerfile')) || existsSync(path.join(ROOT, 'docker-compose.yml'))){
     steps.push({ id:'compose_scaffold', do:'devops.compose_scaffold', with:{ path:'docker-compose.yml' } });
-    if (!SKIP_COMPOSE) {
-      steps.push({ id:'compose_up', do:'devops.compose_apply', with:{ file:'docker-compose.yml', action:'up', project:'vi-smart', detach:true } });
-    }
+    if (!SKIP_COMPOSE) steps.push({ id:'compose_up', do:'devops.compose_apply', with:{ file:'docker-compose.yml', action:'up', project:'vi-smart', detach:true } });
   }
 
-  // Service wrapper prima del .deb
+  // Service wrapper → deb
   steps.push({ id:'service_wrapper', do:'devops.service_wrapper', with:{ dist:'dist' } });
 
-  // OpenAPI lint (se presente)
+  // OpenAPI
   const openapi = ['openapi.yaml','openapi.yml','openapi.json'].map(f=>path.join(ROOT,f)).find(f=>existsSync(f));
   if (openapi) steps.push({ id:'openapi_lint', do:'openapi.lint', with:{ spec_path: openapi } });
 
-  // SBOM (skippabile)
+  // SBOM + audits
   steps.push({ id:'sbom', do:'devops.sbom', with:{ target:'.', format:'cyclonedx-json' } });
-
-  // Security audit
-  const hasPkg = existsSync(path.join(ROOT, 'package.json'));
-  const hasPy2  = existsSync(path.join(ROOT, 'pyproject.toml')) || existsSync(path.join(ROOT,'requirements.txt'));
   if (hasPkg) steps.push({ id:'audit_node', do:'security.audit', with:{ type:'node', path:'.' } });
-  if (hasPy2)  steps.push({ id:'audit_py',   do:'security.audit', with:{ type:'python', path:'.' } });
+  if (hasPy)  steps.push({ id:'audit_py',   do:'security.audit', with:{ type:'python', path:'.' } });
+  steps.push({ id:'secrets', do:'security.secrets', with:{ dir:'.' } });
+  steps.push({ id:'semgrep', do:'security.semgrep', with:{ dir:'.' } });
+  steps.push({ id:'trivy',   do:'security.trivy',   with:{ target:'.', format:'table' } });
+
+  // IaC/Platform
+  if (existsSync(path.join(ROOT,'k8s')))       steps.push({ id:'k8s_apply', do:'devops.k8s_apply', with:{ file:'k8s/' } });
+  if (existsSync(path.join(ROOT,'chart')))     steps.push({ id:'helm_template', do:'devops.helm_template', with:{ chart:'chart', out:'.vi-smart/helm.yaml' } });
+  if (existsSync(path.join(ROOT,'terraform'))) steps.push({ id:'tf_validate', do:'devops.tf_validate', with:{ dir:'terraform' } });
+  const playbook = ['site.yml','playbook.yml'].map(f=>path.join(ROOT,f)).find(f=>existsSync(f));
+  if (playbook) steps.push({ id:'ansible_check', do:'devops.ansible_check', with:{ playbook: path.basename(playbook) } });
 
   // Packaging .deb (solo fuori CI)
-  if (!SKIP_DEB) {
-    const distDir = path.join(ROOT,'dist');
-    if (existsSync(distDir)){
-      const service = [
-        '[Unit]','Description=vi-smart service','After=network.target','',
-        '[Service]','Type=simple','ExecStart=/opt/vi-smart/start.sh','Restart=on-failure','User=root','',
-        '[Install]','WantedBy=multi-user.target'
-      ].join('\n');
-      steps.push({ id:'deb_build', do:'devops.deb_build', with:{ name:'vi-smart', version:'0.1.0', input_dir:'dist', out_dir:'out', service } });
-    }
+  if (!SKIP_DEB && existsSync(path.join(ROOT,'dist'))){
+    const service = [
+      '[Unit]','Description=vi-smart service','After=network.target','',
+      '[Service]','Type=simple','ExecStart=/opt/vi-smart/start.sh','Restart=on-failure','User=root','',
+      '[Install]','WantedBy=multi-user.target'
+    ].join('\n');
+    steps.push({ id:'deb_build', do:'devops.deb_build', with:{ name:'vi-smart', version:'0.2.0', input_dir:'dist', out_dir:'out', service } });
   }
 
-  // Web MAX + ADR + README synth
+  // Web MAX + ADR + README + CHANGELOG
   steps.push({ id:'research', do:'research.web', with:{ queries:[
-    'docker compose best practices 2024',
-    'fpm deb packaging systemd best practices',
-    'lint strategy monorepo 2024',
-    'openapi spectral lint rules modern'
+    'docker compose production security best practices 2024 2025',
+    'fpm deb systemd packaging postinst prerm best practices',
+    'semgrep rules auto config modern 2025',
+    'trivy fs misconfig best practices',
+    'openapi spectral ruleset maintained 2025',
+    'terraform validate ci tips',
+    'kubernetes security baseline 2025'
   ]}});
   steps.push({ id:'adr', do:'docs.adr', with:{
-    title:'Tooling baseline (Compose + Service Wrapper + .deb + Lint/Test + SBOM + Audit)',
-    context:'Baseline riproducibile cross-stack per Vi-Smart con orchestrazione locale, service wrapper per .deb, qualità e sicurezza.',
-    decision:'Compose per orchestrazione, wrapper start.sh in /opt, fpm per .deb, lint/test per stack node/python, SBOM via syft e audit deps.',
-    consequences:'Setup coerente; rischi: dipendenze locali; mitigazione: flag CI/skip e ADR.',
+    title:'Baseline estesa: Compose + Service Wrapper + .deb + SBOM + Audit + Semgrep + Trivy + IaC',
+    context:'Baseline riproducibile, con sicurezza e validazioni IaC.',
+    decision:'Estensione con SAST/Container/IaC checks e packaging .deb; flags CI per evitare step non riproducibili.',
+    consequences:'Copertura ampia; esecuzioni opzionali; rischio tool mancanti mitigato da fallback.'
   }});
+  steps.push({ id:'changelog', do:'docs.changelog', with:{ version:'0.2.0', items:[
+    'Aggiunti tool MCP: k8s/helm/terraform/ansible/trivy/semgrep/gh',
+    'Guild security: secrets, semgrep, trivy',
+    'IaC validation e helm template',
+    'Changelog bump e README synth'
+  ]}});
   steps.push({ id:'readme', do:'docs.readme', with:{} });
 
   return steps;
 }
+
 
 // ---- Orchestrator ----
 async function runStep(proc, ctx, step, memo){
   await journal({event:'step_start', step:step.id});
   let res;
   switch(step.do){
+    case 'docs.changelog':               res = await Guild.Docs_changelog(proc, ctx, step.with||{}); break;
+    case 'security.secrets':             res = await Guild.Security_secrets(proc, ctx, step.with||{}); break;
+    case 'devops.ansible_check':         res = await Guild.DevOps_ansibleCheck(proc, ctx, step.with||{}); break;
+    case 'devops.tf_validate':           res = await Guild.DevOps_tfValidate(proc, ctx, step.with||{}); break;
+    case 'devops.helm_template':         res = await Guild.DevOps_helmTemplate(proc, ctx, step.with||{}); break;
+    case 'devops.k8s_apply':             res = await Guild.DevOps_k8sApply(proc, ctx, step.with||{}); break;
+    case 'security.trivy':               res = await Guild.Security_trivy(proc, ctx, step.with||{}); break;
+    case 'security.semgrep':             res = await Guild.Security_semgrep(proc, ctx, step.with||{}); break;
     case 'code.global_scan':           res = await Guild.Code_globalScan(proc, ctx, step.with||{}); break;
     case 'qa.lint':                    res = await Guild.QA_lint(proc, ctx, step.with||{}); break;
     case 'qa.test':                    res = await Guild.QA_test(proc, ctx, step.with||{}); break;

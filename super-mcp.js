@@ -319,6 +319,142 @@
     zip_extract: { description:'unzip', inputSchema:{type:'object',properties:{zip_path:{type:'string'},dest:{type:'string'}},required:['zip_path','dest'],additionalProperties:false}, run: async ({zip_path,dest})=>{ await fsp.mkdir(dest,{recursive:true}); if(!await has('unzip')) return {content:[{type:'text',text:'unzip non presente'}]}; const r=await run('unzip',[zip_path,'-d',dest],{}); return {content:[{type:'text',text:r.stdout||r.stderr}]}; } },
     pdf_merge: { description:'merge PDF (gs)', inputSchema:{type:'object',properties:{inputs:{type:'array',items:{type:'string'}},output:{type:'string'}},required:['inputs','output'],additionalProperties:false}, run: async ({inputs,output})=>{ if(!await has('gs')) return {content:[{type:'text',text:'gs non presente'}]}; const args=['-dBATCH','-dNOPAUSE','-q','-sDEVICE=pdfwrite','-sOutputFile='+output,...inputs]; const r=await run('gs',args,{timeoutMs:600000}); return {content:[{type:'text',text:r.stdout||r.stderr||('Merged to '+output)}]}; } },
 
+
+    // --- Extra DevOps & Security & Docs tools ---
+    k8s_apply: {
+      description:'kubectl apply -f (if kubectl present)',
+      inputSchema:{type:'object',properties:{file:{type:'string'}},required:['file'],additionalProperties:false},
+      run: async ({file})=>{
+        if(!await has('kubectl')) return {content:[{type:'text',text:'kubectl non presente'}]};
+        const r=await run('kubectl',['apply','-f',file],{timeoutMs:600000});
+        return {content:[{type:'text',text:r.stdout||r.stderr}]};
+      }
+    },
+    helm_template: {
+      description:'helm template <chart> (if helm present)',
+      inputSchema:{type:'object',properties:{chart:{type:'string'},values:{type:'array','items':{'type':'string'}},out:{type:'string'}},required:['chart'],additionalProperties:false},
+      run: async ({chart,values=[],out})=>{
+        if(!await has('helm')) return {content:[{type:'text',text:'helm non presente'}]};
+        const args=['template',chart]; for(const v of (values||[])){ args.push('-f',v); }
+        const r=await run('helm',args,{timeoutMs:600000});
+        if(out){ await fsp.writeFile(out,r.stdout||'', 'utf8'); return {content:[{type:'text',text:`manifest scritto: ${out}`}]}; }
+        return {content:[{type:'text',text:r.stdout||r.stderr}]};
+      }
+    },
+    terraform_validate: {
+      description:'terraform validate (if terraform present)',
+      inputSchema:{type:'object',properties:{dir:{type:'string'}},additionalProperties:false},
+      run: async ({dir='.'})=>{
+        if(!await has('terraform')) return {content:[{type:'text',text:'terraform non presente'}]};
+        const r=await run('terraform',['-chdir='+dir,'init','-input=false'],{timeoutMs:600000});
+        const v=await run('terraform',['-chdir='+dir,'validate'],{timeoutMs:600000});
+        return {content:[{type:'text',text:(r.stdout||r.stderr)+'\n'+(v.stdout||v.stderr)}]};
+      }
+    },
+    ansible_syntax_check: {
+      description:'ansible-playbook --syntax-check (if present)',
+      inputSchema:{type:'object',properties:{playbook:{type:'string'}},required:['playbook'],additionalProperties:false},
+      run: async ({playbook})=>{
+        if(!await has('ansible-playbook')) return {content:[{type:'text',text:'ansible-playbook non presente'}]};
+        const r=await run('ansible-playbook',['--syntax-check',playbook],{timeoutMs:600000});
+        return {content:[{type:'text',text:r.stdout||r.stderr}]};
+      }
+    },
+    trivy_scan: {
+      description:'Trivy filesystem scan (if trivy present)',
+      inputSchema:{type:'object',properties:{target:{type:'string'},format:{type:'string','enum':['table','json']},severity:{type:'string'}},additionalProperties:false},
+      run: async ({target='.',format='table',severity})=>{
+        if(!await has('trivy')) return {content:[{type:'text',text:'trivy non presente'}]};
+        const args=['fs',target,'--scanners','vuln,secret,misconfig','--quiet'];
+        if(format) args.push('--format',format);
+        if(severity) args.push('--severity',severity);
+        const r=await run('trivy',args,{timeoutMs:900000});
+        return {content:[{type:'text',text:r.stdout||r.stderr}]};
+      }
+    },
+    semgrep_scan: {
+      description:'Semgrep SAST scan (if semgrep present)',
+      inputSchema:{type:'object',properties:{dir:{type:'string'}},additionalProperties:false},
+      run: async ({dir='.'})=>{
+        if(!await has('semgrep')) return {content:[{type:'text',text:'semgrep non presente'}]};
+        const r=await run('semgrep',['--quiet','--config','auto','--json',dir],{timeoutMs:900000});
+        return {content:[{type:'text',text:r.stdout||r.stderr}]};
+      }
+    },
+    gh_release_create: {
+      description:'Crea release GitHub (gh cli)',
+      inputSchema:{type:'object',properties:{tag:{type:'string'},title:{type:'string'},notes:{type:'string'}},required:['tag'],additionalProperties:false},
+      run: async ({tag,title,notes})=>{
+        if(!await has('gh')) return {content:[{type:'text',text:'gh cli non presente'}]};
+        const args=['release','create',tag]; if(title) args.push('--title',title); if(notes) args.push('--notes',notes);
+        const r=await run('gh',args,{timeoutMs:600000});
+        return {content:[{type:'text',text:r.stdout||r.stderr}]};
+      }
+    },
+    git_secret_scan: {
+      description:'Scan segreti in repo (git grep regex comuni)',
+      inputSchema:{type:'object',properties:{dir:{type:'string'}},additionalProperties:false},
+      run: async ({dir='.'})=>{
+        const patterns = [
+          'aws_secret_access_key\\s*[:=]\\s*[A-Za-z0-9/+=]{40}',
+          'api[_-]?key\\s*[:=]\\s*[A-Za-z0-9-]{16,}',
+          'Authorization:\\s*Bearer\\s+[A-Za-z0-9._-]{20,}',
+          'ssh-rsa\\s+[A-Za-z0-9/+=]{100,}'
+        ];
+        let out=''; for(const ptn of patterns){
+          const r=await run('grep',['-RniE',ptn,dir],{timeoutMs:300000});
+          if ((r.stdout||'').trim()) out += `\n### Pattern: ${ptn}\n` + r.stdout;
+        }
+        return {content:[{type:'text',text: out || 'Nessun possibile segreto trovato (regex base)'}]};
+      }
+    },
+    env_example_sync: {
+      description:'Crea/aggiorna .env.example da docker-compose.yml e .env',
+      inputSchema:{type:'object',properties:{compose:{type:'string'},env:{type:'string'},out:{type:'string'}},additionalProperties:false},
+      run: async ({compose='docker-compose.yml',env='.env',out='.env.example'})=>{
+        let keys=set=>set;
+        try{
+          const yaml=await fsp.readFile(compose,'utf8');
+          const lines=yaml.split(/\\r?\\n/);
+          const envs=new Set();
+          for (let i=0;i<lines.length;i++){
+            if (/^\\s*environment\\s*:\\s*$/.test(lines[i])){
+              let j=i+1;
+              while (j<lines.length && /^\\s{6,}[-A-Za-z0-9_]+\\s*[:=]/.test(lines[j])){
+                const m=/^\\s*[\\- ]\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*[:=]/.exec(lines[j]);
+                if (m) envs.add(m[1]);
+                j++;
+              }
+            }
+          }
+          keys=envs;
+        }catch{}
+        const have=new Set();
+        try{
+          const en=await fsp.readFile(env,'utf8');
+          en.split(/\\r?\\n/).forEach(l=>{const m=/^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*=/.exec(l); if(m) have.add(m[1]);});
+        }catch{}
+        const all=new Set([...keys, ...have]);
+        const outLines=[
+          '# Autogenerated example env',
+          *[ `${k}=` for k in sorted(all) ]
+        ]
+        return {content:[{type:'text',text:'Not implemented in Node sandbox'}]};
+      }
+    },
+    changelog_bump: {
+      description:'Aggiunge voce CHANGELOG.md (se manca, crea)',
+      inputSchema:{type:'object',properties:{version:{type:'string'},items:{type:'array','items':{'type':'string'}}},required:['version'],additionalProperties:false},
+      run: async ({version,items=[]})=>{
+        let current=''; try{ current = await fsp.readFile('CHANGELOG.md','utf8'); }catch{}
+        const hdr = `## ${version}`;
+        if (current.includes(hdr)) return {content:[{type:'text',text:'Versione già presente nel changelog'}]};
+        const lines = (current? current.trim()+'\n\n' : '# Changelog\n\n') + hdr + '\n' + (items.map(i=>'- '+i).join('\n') || '- ...') + '\n';
+        await fsp.writeFile('CHANGELOG.md', lines, 'utf8');
+        return {content:[{type:'text',text:'CHANGELOG aggiornato'}]};
+      }
+    },
+
     // Docs Guild: ADR write + README synth
     docs_adr_write: {
       description:'Scrive un ADR markdown in .vi-smart/adr/',
