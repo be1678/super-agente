@@ -40,6 +40,12 @@ jobs:
           npm i -g @stoplight/spectral-cli || true
 
       - name: Install Syft (SBOM)
+
+      - name: Install Trivy & Semgrep (optional)
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin || true
+          python -m pip install semgrep || true
+
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin || true
 
