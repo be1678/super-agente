@@ -1,0 +1,61 @@
+name: vi-smart-ci
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            **/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dev deps (conditional)
+        run: |
+          if [ -f package.json ]; then npm ci || true; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+          python -m pip install --upgrade pip wheel || true
+          python -m pip install pytest ruff || true
+
+      - name: Install Spectral (OpenAPI lint)
+        run: |
+          npm i -g @stoplight/spectral-cli || true
+
+      - name: Install Syft (SBOM)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin || true
+
+      - name: Orchestrate (CI-safe)
+        env:
+          VI_SMART_SKIP_COMPOSE: "1"
+          VI_SMART_SKIP_DEB: "1"
+          NODE_NO_WARNINGS: "1"
+        run: |
+          node fabric.mjs
+
+      - name: Upload ADR & context
+        uses: actions/upload-artifact@v4
+        with:
+          name: vi-smart-artifacts
+          path: |
+            .vi-smart/**
+            README.md
+          if-no-files-found: ignore
