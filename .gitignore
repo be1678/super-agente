@@ -1,0 +1,7 @@
+node_modules/
+out/
+.tmp-deb-*/
+.vscode/
+.DS_Store
+.vi-smart/archive/
+sbom.*.json

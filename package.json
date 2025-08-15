@@ -1,0 +1,14 @@
+{
+  "name": "vi-smart-fabric",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vi-Smart Agent Fabric (Guilds + APL + deb + compose + ADR + Pattern Mining)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "mcp": "node super-mcp.js",
+    "orchestrate": "node fabric.mjs",
+    "run": "node fabric.mjs",
+    "ci": "VI_SMART_SKIP_COMPOSE=1 VI_SMART_SKIP_DEB=1 node fabric.mjs"
+  }
+}
